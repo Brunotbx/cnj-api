@@ -45,6 +45,7 @@ O serviço utiliza os seguintes recursos:
 ## Uso e validação
 1. **Enviando uma requisição do tipo POST para a API**:
    - URL: `https://{api-id}.execute-api.{region}.amazonaws.com/dev/send-new-cnj`
+   - Exemplo de body: `{ "cnjProcessNumber": "000000000000000"}`
    - Corpo da requisição: JSON contendo o número CNJ.
 
 2. **Verificando**:
