@@ -1,0 +1,158 @@
+service: service-cnj-bt
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+          Resource: arn:aws:dynamodb:us-east-1:${aws:accountId}:table/CNJTableBt
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+          Resource: arn:aws:sqs:us-east-1:${aws:accountId}:CNJQueueBt
+
+functions:
+  CNJProcess:
+    handler: index.handler
+    description: Serviço para processamento de um numero CNJ
+    events:
+      - sqs:
+          arn: arn:aws:sqs:us-east-1:${aws:accountId}:CNJQueueBt
+
+resources:
+  Resources:
+    # Criação da tabela DynamoDB
+    CNJTableBt:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: CNJTableBt
+        AttributeDefinitions:
+          - AttributeName: cnjProcessNumber
+            AttributeType: S
+        KeySchema:
+          - AttributeName: cnjProcessNumber
+            KeyType: HASH
+        # No contexto on-demand considerar adição do auto-scaling
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 10
+    # Criação de uma fila usando SQS
+    CNJQueueBt:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: CNJQueueBt
+    # Role do API Gateway para permitir o uso de fila SQS
+    ApiGatewaySqsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: apigateway.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: ApiGatewaySqsPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: sqs:SendMessage
+                  Resource: arn:aws:sqs:us-east-1:${aws:accountId}:CNJQueueBt
+    # Role para criação do API Gateway usando um end-point Regional para reduzir latência
+    ApiGatewayRestApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties: 
+        Name: "bt-api-cnj"
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+    # Role com os recursos do API Gateway
+    ApiGatewayResource:
+      Type: AWS::ApiGateway::Resource 
+      Properties: 
+        ParentId:
+          Fn::GetAtt: 
+            - ApiGatewayRestApi
+            - RootResourceId
+        PathPart: "send-new-cnj"
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+    # Essa role define os métodos HTTP do API Gateway
+    ApiGatewayMethod:
+      Type: AWS::ApiGateway::Method
+      Properties: 
+        # Não adicionada autenticação seguindo escopo do teste
+        AuthorizationType: "NONE" 
+        HttpMethod: POST
+        ResourceId: 
+          Ref: ApiGatewayResource
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+        RequestParameters:
+          method.request.header.Content-Type: true
+        Integration:
+          IntegrationHttpMethod: POST
+          Type: AWS
+          Credentials: !GetAtt ApiGatewaySqsRole.Arn
+          Uri:
+            Fn::Sub: arn:aws:apigateway:${AWS::Region}:sqs:action/SendMessage&QueueUrl=https://sqs.${AWS::Region}.amazonaws.com/${aws:accountId}/CNJQueueBt
+          RequestParameters:
+            integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+          RequestTemplates:
+            application/json: |
+              Action=SendMessage&MessageBody=$input.body
+          IntegrationResponses:
+            - StatusCode: 200
+        MethodResponses:
+          - StatusCode: 200
+    # Role que define a implantação do API Gateway, atualmente dev
+    ApiGatewayDeployment:
+      Type: AWS::ApiGateway::Deployment
+      Properties:
+        RestApiId: 
+          Ref: ApiGatewayRestApi
+        StageName: dev
+      DependsOn:
+        - ApiGatewayMethod
+
+    # O exemplo abaixo segue apenas como base para demonstrar uma futura implementação do Cognito (Fluxo) como ferramenta de autenticação (não solicitado no teste)
+    # Role com o pool de autenticação usando o Cognito
+    # CognitoUserPool:
+    #   Type: AWS::Cognito::UserPool
+    #   Properties:
+    #     UserPoolName: CNJUserPool
+    #     # O atributo que será usado para verificação é o e-mail
+    #     AutoVerifiedAttributes:
+    #       - email
+    # Cognito User Pool Client para permitir que os usuários façam login
+    # CognitoUserPoolClient:
+    #   Type: AWS::Cognito::UserPoolClient
+    #   Properties:
+    #     UserPoolId:
+    #       Ref: CognitoUserPool
+    #     ClientName: CNJAppClient
+    #     GenerateSecret: false
+    #     AllowedOAuthFlowsUserPoolClient: true
+    #     AllowedOAuthFlows:
+    #       - code
+    #     AllowedOAuthScopes:
+    #       - email
+    #       - openid
+    # Role com o Cognito Authorizer para o API Gateway
+    # CognitoAuthorizer:
+    #   Type: AWS::ApiGateway::Authorizer
+    #   Properties:
+    #     Name: CognitoAuthorizer
+    #     IdentitySource: method.request.header.Authorization
+    #     RestApiId: 
+    #       Ref: ApiGatewayRestApi
+    #     Type: COGNITO_USER_POOLS
+    #     ProviderARNs:
+    #       - Fn::GetAtt: [CognitoUserPool, Arn]
